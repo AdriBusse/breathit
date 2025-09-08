@@ -96,17 +96,15 @@ export default function BreathApp() {
     } catch {}
   }, []);
 
-  // Capture the cycles shown in the popup for consistent save
-  React.useEffect(() => {
-    if (finished) setFinalCycles(cyclesCompleted);
-  }, [finished, cyclesCompleted]);
-
+  // When finished: snapshot cycles and save a single history entry
   React.useEffect(() => {
     if (!finished || !config || savedThisSessionRef.current === true) return;
+    const cycles = cyclesCompleted; // snapshot exactly what we display
+    setFinalCycles(cycles);
     const record: SessionRecord = {
       id: cryptoRandomId(),
       date: new Date().toISOString(),
-      cycles: finalCycles,
+      cycles,
       totalMs: config.totalMs,
       mode: mode ?? "health-breath",
       inhaleMs: inhaleSec * 1000,
@@ -121,7 +119,7 @@ export default function BreathApp() {
       return next;
     });
     savedThisSessionRef.current = true;
-  }, [finished, config, finalCycles, mode, inhaleSec, holdSec, exhaleSec]);
+  }, [finished, config, cyclesCompleted, mode, inhaleSec, holdSec, exhaleSec]);
 
   // Confetti when the summary dialog opens
   React.useEffect(() => {
@@ -344,7 +342,7 @@ export default function BreathApp() {
           </div>
           <div className="flex justify-between py-1">
             <span>Cycles</span>
-            <span className="font-medium">{finalCycles}</span>
+            <span className="font-medium">{finalCycles || cyclesCompleted}</span>
           </div>
         </div>
         <DialogActions>
