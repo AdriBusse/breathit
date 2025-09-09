@@ -59,7 +59,7 @@ export default function RootLayout({
         <Script
           defer
           data-domain="breathit-adrianbusse.xyz"
-          src="https://plausible-y0cwc4ksok0w4c80oco8o4kg.168.119.49.31.sslip.io/js/script.pageview-props.tagged-events.js"
+          src="https://plausible.adrianbusse.xyz/js/script.pageview-props.tagged-events.js"
           strategy="afterInteractive"
         />
       </body>
