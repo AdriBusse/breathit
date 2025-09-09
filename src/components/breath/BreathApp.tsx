@@ -59,6 +59,9 @@ export default function BreathApp() {
   const previewRef = React.useRef<HTMLAudioElement | null>(null);
   const cycleSoundRef = React.useRef<HTMLAudioElement | null>(null);
   const endSoundRef = React.useRef<HTMLAudioElement | null>(null);
+  // Audio unlock + WebAudio fallback for strict browsers (Safari/Firefox)
+  const audioUnlockedRef = React.useRef(false);
+  const audioCtxRef = React.useRef<any>(null);
   // Phase tracking for sound cues
   const prevPhaseRef = React.useRef<Phase | null>(null);
   const cuePlayedRef = React.useRef(false);
@@ -145,6 +148,71 @@ export default function BreathApp() {
     }
   }, []);
 
+  // Unlock audio on first user gesture; also set up a WebAudio context for fallback beeps
+  React.useEffect(() => {
+    if (audioUnlockedRef.current) return;
+    const unlock = async () => {
+      if (audioUnlockedRef.current) return;
+      audioUnlockedRef.current = true;
+      try {
+        const AC: any = (window as any).AudioContext || (window as any).webkitAudioContext;
+        if (AC) {
+          audioCtxRef.current = new AC();
+          if (audioCtxRef.current.state === "suspended") await audioCtxRef.current.resume();
+        }
+      } catch {}
+      // Prime <audio> elements by playing muted once
+      const els: (HTMLAudioElement | null)[] = [cycleSoundRef.current, previewRef.current, endSoundRef.current];
+      for (const el of els) {
+        if (!el) continue;
+        try {
+          el.muted = true;
+          el.volume = 0;
+          await el.play();
+          el.pause();
+          el.currentTime = 0;
+          el.muted = false;
+          el.volume = 1;
+        } catch {}
+      }
+      // Remove listeners after unlock
+      document.removeEventListener("pointerdown", unlock);
+      document.removeEventListener("keydown", unlock);
+      document.removeEventListener("touchstart", unlock as any);
+      document.removeEventListener("click", unlock);
+    };
+    document.addEventListener("pointerdown", unlock, { passive: true } as any);
+    document.addEventListener("keydown", unlock);
+    document.addEventListener("touchstart", unlock as any, { passive: true } as any);
+    document.addEventListener("click", unlock);
+    return () => {
+      document.removeEventListener("pointerdown", unlock);
+      document.removeEventListener("keydown", unlock);
+      document.removeEventListener("touchstart", unlock as any);
+      document.removeEventListener("click", unlock);
+    };
+  }, []);
+
+  // Small WebAudio beep fallback when HTMLAudio playback is blocked
+  const beep = React.useCallback((ms = 140, freq = 660) => {
+    try {
+      const ctx: any = audioCtxRef.current;
+      if (!ctx) return;
+      const o = ctx.createOscillator();
+      const g = ctx.createGain();
+      o.type = "sine";
+      o.frequency.value = freq;
+      o.connect(g);
+      g.connect(ctx.destination);
+      const now = ctx.currentTime;
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(0.25, now + 0.01);
+      g.gain.exponentialRampToValueAtTime(0.0001, now + ms / 1000);
+      o.start(now);
+      o.stop(now + ms / 1000 + 0.02);
+    } catch {}
+  }, []);
+
   const finished =
     step === "session" &&
     sessionStartedRef.current &&
@@ -193,8 +261,13 @@ export default function BreathApp() {
       try {
         const el = cycleSoundRef.current;
         el.currentTime = 0;
-        void el.play();
-      } catch {}
+        const p = el.play();
+        if (p && typeof p.then === "function") {
+          p.catch(() => beep());
+        }
+      } catch {
+        beep();
+      }
       cuePlayedRef.current = true;
     }
   }, [currentRemaining, phase, running]);
@@ -241,13 +314,16 @@ export default function BreathApp() {
   React.useEffect(() => {
     if (!finished || confettiFiredRef.current) return;
     confettiFiredRef.current = true;
-    // Play end-of-session sound
+    // Play end-of-session sound (fallback to beep)
     try {
       if (endSoundRef.current) {
         endSoundRef.current.currentTime = 0;
-        void endSoundRef.current.play();
+        const p = endSoundRef.current.play();
+        if (p && typeof p.then === "function") p.catch(() => beep(220, 520));
       }
-    } catch {}
+    } catch {
+      beep(220, 520);
+    }
     const colors = ["#10b981", "#14b8a6", "#3b82f6", "#6366f1"]; // green + blue palette
     const cx = 0.5;
     const cy = 0.48;
