@@ -9,6 +9,13 @@ import { Input } from "@/components/ui/input";
 import NumberStepper from "@/components/ui/number-stepper";
 import { Collapsible, CollapsibleContent, CollapsibleTrigger } from "@/components/ui/collapsible";
 import { useBreathing, Phase } from "@/components/breath/useBreathing";
+import { useI18n } from "@/components/i18n/I18nProvider";
+// Safe Plausible helper (no-op if not available)
+function track(event: string, props?: Record<string, any>) {
+  try {
+    (window as any)?.plausible?.(event, props ? { props } : undefined);
+  } catch {}
+}
 import confetti from "canvas-confetti";
 
 type Step = "idle" | "mode" | "time" | "session";
@@ -30,6 +37,7 @@ function msToClock(ms: number) {
 }
 
 export default function BreathApp() {
+  const { t } = useI18n();
   const [step, setStep] = React.useState<Step>("idle");
   const [mode, setMode] = React.useState<"health-breath">();
   const [minutes, setMinutes] = React.useState<number>(5);
@@ -44,6 +52,16 @@ export default function BreathApp() {
   const confettiFiredRef = React.useRef(false);
   const [finalCycles, setFinalCycles] = React.useState(0);
   const sessionStartedRef = React.useRef(false);
+  const startReportedRef = React.useRef(false);
+  // Sounds
+  const [availableSounds, setAvailableSounds] = React.useState<string[]>([]);
+  const [selectedSound, setSelectedSound] = React.useState<string>("gong.mp3");
+  const previewRef = React.useRef<HTMLAudioElement | null>(null);
+  const cycleSoundRef = React.useRef<HTMLAudioElement | null>(null);
+  const endSoundRef = React.useRef<HTMLAudioElement | null>(null);
+  // Phase tracking for sound cues
+  const prevPhaseRef = React.useRef<Phase | null>(null);
+  const cuePlayedRef = React.useRef(false);
 
   const config = React.useMemo(() => {
     if (!mode) return null;
@@ -51,14 +69,81 @@ export default function BreathApp() {
     return { inhaleMs: inhaleSec * 1000, holdMs: holdSec * 1000, exhaleMs: exhaleSec * 1000, totalMs };
   }, [mode, minutes, inhaleSec, holdSec, exhaleSec]);
 
-  const { phase, running, start, stop, progress, totalRemaining, cyclesCompleted } = useBreathing(config);
+  const { phase, running, start, stop, progress, totalRemaining, currentRemaining, cyclesCompleted } = useBreathing(config);
 
   // Start session when entering the session step
   React.useEffect(() => {
     if (step === "session" && config) {
+      // reset phase tracker for new session to avoid spurious sound
+      prevPhaseRef.current = null;
+      cuePlayedRef.current = false;
+      startReportedRef.current = false;
       start();
     }
   }, [step, config, start]);
+
+  // Load available cycle sounds from API (fallback to default if failed)
+  React.useEffect(() => {
+    let cancelled = false;
+    async function load() {
+      try {
+        const res = await fetch("/api/sounds");
+        const data = (await res.json()) as { sounds?: string[] };
+        if (!cancelled) {
+          const list = Array.isArray(data.sounds) && data.sounds.length > 0 ? data.sounds : ["gong.mp3"];
+          setAvailableSounds(list);
+          // Ensure selected is valid
+          setSelectedSound((prev) => (list.includes(prev) ? prev : "gong.mp3"));
+        }
+      } catch {
+        if (!cancelled) {
+          setAvailableSounds(["gong.mp3"]);
+          setSelectedSound("gong.mp3");
+        }
+      }
+    }
+    load();
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  // Keep reusable audio element for cycle sound in sync with selectedSound
+  React.useEffect(() => {
+    // If turned off, clear audio element to prevent accidental playback
+    if (!selectedSound) {
+      if (cycleSoundRef.current) {
+        try {
+          cycleSoundRef.current.pause();
+        } catch {}
+      }
+      cycleSoundRef.current = null;
+      return;
+    }
+    if (!cycleSoundRef.current) {
+      cycleSoundRef.current = new Audio();
+    }
+    const el = cycleSoundRef.current;
+    el.src = `/sounds/cycle/${selectedSound}`;
+    el.preload = "auto";
+    // Ensure volume reasonable (full by default)
+    el.volume = 1.0;
+    // iOS-friendly: call load explicitly
+    try {
+      el.load();
+    } catch {}
+  }, [selectedSound]);
+
+  // Preload end-of-session sound once
+  React.useEffect(() => {
+    if (!endSoundRef.current) {
+      endSoundRef.current = new Audio("/sounds/end_meditation.mp3");
+      endSoundRef.current.preload = "auto";
+      try {
+        endSoundRef.current.load();
+      } catch {}
+    }
+  }, []);
 
   const finished =
     step === "session" &&
@@ -82,8 +167,37 @@ export default function BreathApp() {
       sessionStartedRef.current = false;
       return;
     }
-    if (running) sessionStartedRef.current = true;
-  }, [step, running]);
+    if (running) {
+      sessionStartedRef.current = true;
+      if (!startReportedRef.current) {
+        startReportedRef.current = true;
+        // duration reported in minutes
+        track("BreathSessionStart", { duration: Math.max(1, minutes) });
+      }
+    }
+  }, [step, running, minutes]);
+
+  // Play cycle sound 300ms before transitions: hold -> exhale and hold2 -> inhale
+  // Reset cue state when phase changes
+  React.useEffect(() => {
+    if (prevPhaseRef.current !== phase) {
+      prevPhaseRef.current = phase;
+      cuePlayedRef.current = false;
+    }
+  }, [phase]);
+  // Fire cue when remaining time in a hold phase drops to <= 300ms
+  React.useEffect(() => {
+    if (!running || !cycleSoundRef.current) return;
+    if (!(phase === "hold" || phase === "hold2")) return;
+    if (currentRemaining <= 300 && !cuePlayedRef.current) {
+      try {
+        const el = cycleSoundRef.current;
+        el.currentTime = 0;
+        void el.play();
+      } catch {}
+      cuePlayedRef.current = true;
+    }
+  }, [currentRemaining, phase, running]);
 
   // History persistence
   React.useEffect(() => {
@@ -101,6 +215,8 @@ export default function BreathApp() {
     if (!finished || !config || savedThisSessionRef.current === true) return;
     const cycles = cyclesCompleted; // snapshot exactly what we display
     setFinalCycles(cycles);
+    // Report completion to Plausible
+    track("BreathSessionComplete", { duration: Math.max(1, minutes) });
     const record: SessionRecord = {
       id: cryptoRandomId(),
       date: new Date().toISOString(),
@@ -119,12 +235,19 @@ export default function BreathApp() {
       return next;
     });
     savedThisSessionRef.current = true;
-  }, [finished, config, cyclesCompleted, mode, inhaleSec, holdSec, exhaleSec]);
+  }, [finished, config, cyclesCompleted, mode, inhaleSec, holdSec, exhaleSec, minutes]);
 
   // Confetti when the summary dialog opens
   React.useEffect(() => {
     if (!finished || confettiFiredRef.current) return;
     confettiFiredRef.current = true;
+    // Play end-of-session sound
+    try {
+      if (endSoundRef.current) {
+        endSoundRef.current.currentTime = 0;
+        void endSoundRef.current.play();
+      }
+    } catch {}
     const colors = ["#10b981", "#14b8a6", "#3b82f6", "#6366f1"]; // green + blue palette
     const cx = 0.5;
     const cy = 0.48;
@@ -167,7 +290,7 @@ export default function BreathApp() {
       {step === "session" && (
         <div className="absolute top-4 left-0 right-0 text-center text-sm/6">
           <span className="inline-flex items-center gap-2 rounded-full bg-white/10 px-3 py-1 backdrop-blur-sm">
-            Total remaining: <strong className="tabular-nums">{msToClock(totalRemaining)}</strong>
+            {t("total_remaining")} <strong className="tabular-nums">{msToClock(totalRemaining)}</strong>
           </span>
         </div>
       )}
@@ -180,35 +303,35 @@ export default function BreathApp() {
               onClick={() => setStep("mode")}
               className="h-36 w-36 rounded-full bg-gradient-to-br from-teal-500 to-emerald-500 text-white text-lg font-semibold shadow-lg active:scale-[0.98] focus:outline-none focus-visible:ring-4 focus-visible:ring-white/40"
             >
-              Start Breathing
+              {t("start")}
             </button>
             <p className="mt-6 text-white/80 text-center text-sm">
-              Learn to breathe well with a gentle guided practice.
+              {t("learn_more")}
             </p>
 
             {/* History list */}
             {history.length > 0 && (
               <div className="mt-10 w-full max-w-sm">
                 <div className="mb-2 flex items-center justify-between">
-                  <h3 className="text-sm font-medium text-white/80">History</h3>
+                  <h3 className="text-sm font-medium text-white/80">{t("history")}</h3>
                   <button
                     className="inline-flex items-center gap-1 text-xs text-white/70 hover:text-white/90"
                     onClick={() => setConfirmClearOpen(true)}
-                    aria-label="Clear history"
+                    aria-label={t("clear_history_title")}
                   >
                     <TrashIcon className="size-4" />
-                    Clear
+                    {t("clear")}
                   </button>
                 </div>
                 <div className={history.length > 10 ? "max-h-56 overflow-y-auto pr-1" : undefined}>
-                  <ul className="space-y-1.5" aria-label="Sessions history">
+                  <ul className="space-y-1.5" aria-label={t("sessions_history_aria")}>
                     {history.map((h) => (
                       <li key={h.id} className="text-xs text-white/70 flex items-center justify-between">
                         <span className="tabular-nums">
                           {formatLocalDateTime(h.date)}
                         </span>
                         <span className="tabular-nums">
-                          {msToMinutes(h.totalMs)}m • {h.cycles} cycles
+                          {msToMinutes(h.totalMs)}m • {h.cycles} {t("cycles")}
                         </span>
                       </li>
                     ))}
@@ -221,7 +344,7 @@ export default function BreathApp() {
 
         {step === "mode" && (
           <div className="space-y-6">
-            <h2 className="text-2xl font-semibold">Choose a mode</h2>
+            <h2 className="text-2xl font-semibold">{t("choose_mode")}</h2>
             <Card
               className="cursor-pointer overflow-hidden bg-gradient-to-br from-teal-400/40 to-emerald-400/30 hover:from-teal-400/50 hover:to-emerald-400/40"
               onClick={() => {
@@ -230,25 +353,23 @@ export default function BreathApp() {
               }}
             >
               <CardHeader>
-                <CardTitle>Health Breath</CardTitle>
+                <CardTitle>{t("health_breath")}</CardTitle>
               </CardHeader>
               <CardContent>
-                <p className="text-white/80 text-sm">
-                  A balanced 4-4-4 breathing pattern to calm and focus.
-                </p>
+                <p className="text-white/80 text-sm">{t("health_breath_desc")}</p>
               </CardContent>
             </Card>
             <div className="flex justify-between">
-              <Button variant="ghost" onClick={() => setStep("idle")}>Back</Button>
+              <Button variant="ghost" onClick={() => setStep("idle")}>{t("back")}</Button>
             </div>
           </div>
         )}
 
         {step === "time" && (
           <div className="space-y-6">
-            <h2 className="text-2xl font-semibold">Practice time</h2>
+            <h2 className="text-2xl font-semibold">{t("practice_time")}</h2>
             <div className="text-center">
-              <label className="block mb-2 text-sm text-white/90">Total time</label>
+              <label className="block mb-2 text-sm text-white/90">{t("total_time")}</label>
               <NumberStepper
                 value={minutes}
                 onChange={(v) => setMinutes(Math.max(1, v))}
@@ -265,13 +386,13 @@ export default function BreathApp() {
             <Collapsible open={advancedOpen} onOpenChange={setAdvancedOpen}>
               <CollapsibleTrigger className="-mx-1 flex items-center gap-2 px-1 py-2 text-sm text-white/80 hover:text-white">
                 <Chevron open={advancedOpen} />
-                <span className="font-medium">More settings</span>
+                <span className="font-medium">{t("more_settings")}</span>
               </CollapsibleTrigger>
               <CollapsibleContent>
                 <div className="pt-1">
-                  <div className="grid grid-cols-1 sm:grid-cols-3 gap-3">
-                    <div>
-                      <label className="block mb-1 text-xs text-white/80">Inhale (s)</label>
+                  <div className="flex flex-col items-center gap-4">
+                    <div className="w-full max-w-xs text-center">
+                      <label className="block mb-1 text-xs text-white/80">{t("inhale_s")}</label>
                       <NumberStepper
                         value={inhaleSec}
                         onChange={(v) => setInhaleSec(Math.max(1, v))}
@@ -282,8 +403,8 @@ export default function BreathApp() {
                         size="sm"
                       />
                     </div>
-                    <div>
-                      <label className="block mb-1 text-xs text-white/80">Hold (s)</label>
+                    <div className="w-full max-w-xs text-center">
+                      <label className="block mb-1 text-xs text-white/80">{t("hold_s")}</label>
                       <NumberStepper
                         value={holdSec}
                         onChange={(v) => setHoldSec(Math.max(1, v))}
@@ -294,8 +415,8 @@ export default function BreathApp() {
                         size="sm"
                       />
                     </div>
-                    <div>
-                      <label className="block mb-1 text-xs text-white/80">Exhale (s)</label>
+                    <div className="w-full max-w-xs text-center">
+                      <label className="block mb-1 text-xs text-white/80">{t("exhale_s")}</label>
                       <NumberStepper
                         value={exhaleSec}
                         onChange={(v) => setExhaleSec(Math.max(1, v))}
@@ -307,15 +428,42 @@ export default function BreathApp() {
                       />
                     </div>
                   </div>
-                  <p className="mt-3 text-xs text-white/70">
-                    Pattern: inhale → hold → exhale → hold, then repeat.
-                  </p>
+                  <div className="mt-4">
+                    <label className="block mb-1 text-xs text-white/80">{t("cycle_sound")}</label>
+                    <select
+                      className="w-full h-9 rounded-lg border border-white/20 bg-white/10 text-white px-3 focus:outline-none focus:ring-2 focus:ring-white/40"
+                      value={selectedSound}
+                      onChange={(e) => {
+                        const name = e.target.value;
+                        setSelectedSound(name);
+                        // Play preview so user hears it (skip when off)
+                        if (!name) return;
+                        try {
+                          if (!previewRef.current) previewRef.current = new Audio();
+                          const el = previewRef.current;
+                          el.src = `/sounds/cycle/${name}`;
+                          el.preload = "auto";
+                          el.currentTime = 0;
+                          void el.play();
+                        } catch {}
+                      }}
+                      aria-label="Select cycle sound"
+                    >
+                      <option value="" className="bg-neutral-900 text-white">{t("no_sound")}</option>
+                      {availableSounds.map((s) => (
+                        <option key={s} value={s} className="bg-neutral-900 text-white">
+                          {s.replace(/\.[^.]+$/, "")}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <p className="mt-3 text-xs text-white/70">{t("pattern_hint")}</p>
                 </div>
               </CollapsibleContent>
             </Collapsible>
             <div className="flex justify-between">
-              <Button variant="ghost" onClick={() => setStep("mode")}>Back</Button>
-              <Button onClick={() => setStep("session")}>Begin</Button>
+              <Button variant="ghost" onClick={() => setStep("mode")}>{t("back")}</Button>
+              <Button size="lg" className="from-teal-400 to-emerald-400" onClick={() => setStep("session")}>{t("begin")}</Button>
             </div>
           </div>
         )}
@@ -331,33 +479,33 @@ export default function BreathApp() {
 
       {/* Summary Dialog */}
       <Dialog open={finished} onOpenChange={(o) => !o && reset()}>
-        <DialogTitle>Great work</DialogTitle>
+        <DialogTitle>{t("great_work")}</DialogTitle>
         <DialogDescription>
-          You completed {Math.max(0, minutes)} minute{minutes !== 1 ? "s" : ""} of Health Breath.
+          {t("completed_minutes", { minutes: Math.max(0, minutes) })}
         </DialogDescription>
         <div className="text-sm text-neutral-800/90">
           <div className="flex justify-between py-1">
-            <span>Total time</span>
+            <span>{t("total_time")}</span>
             <span className="font-medium tabular-nums">{msToClock((config?.totalMs ?? 0))}</span>
           </div>
           <div className="flex justify-between py-1">
-            <span>Cycles</span>
+            <span>{t("cycles")}</span>
             <span className="font-medium">{finalCycles || cyclesCompleted}</span>
           </div>
         </div>
         <DialogActions>
-          <Button onClick={reset}>OK</Button>
+          <Button onClick={reset}>{t("ok")}</Button>
         </DialogActions>
       </Dialog>
 
       {/* Confirm Stop Dialog */}
       <Dialog open={confirmStopOpen} onOpenChange={setConfirmStopOpen}>
-        <DialogTitle>Stop session?</DialogTitle>
+        <DialogTitle>{t("stop_session_title")}</DialogTitle>
         <DialogDescription>
-          Your current breathing session will end and progress won’t be saved.
+          {t("stop_session_desc")}
         </DialogDescription>
         <DialogActions>
-          <Button variant="secondary" onClick={() => setConfirmStopOpen(false)}>Cancel</Button>
+          <Button variant="secondary" onClick={() => setConfirmStopOpen(false)}>{t("cancel")}</Button>
           <Button
             variant="destructive"
             onClick={() => {
@@ -366,19 +514,19 @@ export default function BreathApp() {
               setStep("idle");
             }}
           >
-            Stop now
+            {t("stop_now")}
           </Button>
         </DialogActions>
       </Dialog>
 
       {/* Clear History Dialog */}
       <Dialog open={confirmClearOpen} onOpenChange={setConfirmClearOpen}>
-        <DialogTitle>Clear history?</DialogTitle>
+        <DialogTitle>{t("clear_history_title")}</DialogTitle>
         <DialogDescription>
-          This removes all saved sessions from this device.
+          {t("clear_history_desc")}
         </DialogDescription>
         <DialogActions>
-          <Button variant="secondary" onClick={() => setConfirmClearOpen(false)}>Cancel</Button>
+          <Button variant="secondary" onClick={() => setConfirmClearOpen(false)}>{t("cancel")}</Button>
           <Button
             variant="destructive"
             onClick={() => {
@@ -389,7 +537,7 @@ export default function BreathApp() {
               setConfirmClearOpen(false);
             }}
           >
-            Delete
+            {t("delete")}
           </Button>
         </DialogActions>
       </Dialog>
@@ -398,15 +546,15 @@ export default function BreathApp() {
 }
 
 function SessionView({ phase, progress, onRequestStop }: { phase: Phase; progress: number; onRequestStop: () => void }) {
-  const label =
-    phase === "inhale" ? "Breathe in" : phase === "exhale" ? "Breathe out" : "Keep breath";
+  const { t } = useI18n();
+  const label = phase === "inhale" ? t("breathe_in") : phase === "exhale" ? t("breathe_out") : t("keep_breath");
 
   return (
     <div className="flex flex-col items-center">
       <SemicircleProgress phase={phase} progress={progress} />
       <div className="mt-6 text-lg font-medium tracking-wide">{label}</div>
       <Button className="mt-8 h-12 px-7 text-base font-semibold tracking-wide" variant="destructive" onClick={onRequestStop}>
-        Stop
+        {t("stop")}
       </Button>
     </div>
   );

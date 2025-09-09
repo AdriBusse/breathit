@@ -2,6 +2,10 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 import Script from "next/script";
+import { headers } from "next/headers";
+import { I18nProvider } from "@/components/i18n/I18nProvider";
+import LanguageSwitcher from "@/components/i18n/LanguageSwitcher";
+import { pickLocale, type Locale } from "@/lib/i18n";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -50,12 +54,23 @@ export default function RootLayout({
 }: Readonly<{
   children: React.ReactNode;
 }>) {
+  const h = headers();
+  const accept = h.get("accept-language");
+  // Try common provider headers for geolocation; fallback to Accept-Language
+  const country =
+    h.get("x-vercel-ip-country") ||
+    h.get("cf-ipcountry") ||
+    h.get("x-country") ||
+    h.get("x-country-code") ||
+    null;
+  const initialLocale: Locale = pickLocale(accept, country);
   return (
-    <html lang="en">
-      <body
-        className={`${geistSans.variable} ${geistMono.variable} antialiased`}
-      >
-        {children}
+    <html lang={initialLocale}>
+      <body className={`${geistSans.variable} ${geistMono.variable} antialiased`}>
+        <I18nProvider initialLocale={initialLocale}>
+          <LanguageSwitcher />
+          {children}
+        </I18nProvider>
         <Script
           defer
           data-domain="breathit-adrianbusse.xyz"
