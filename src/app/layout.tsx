@@ -1,6 +1,7 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
+import Script from "next/script";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -55,6 +56,12 @@ export default function RootLayout({
         className={`${geistSans.variable} ${geistMono.variable} antialiased`}
       >
         {children}
+        <Script
+          defer
+          data-domain="breathit-adrianbusse.xyz"
+          src="https://plausible-y0cwc4ksok0w4c80oco8o4kg.168.119.49.31.sslip.io/js/script.pageview-props.tagged-events.js"
+          strategy="afterInteractive"
+        />
       </body>
     </html>
   );
