@@ -240,7 +240,7 @@ export default function BreathApp() {
       if (!startReportedRef.current) {
         startReportedRef.current = true;
         // duration reported in minutes
-        track("BreathSessionStart", { duration: Math.max(1, minutes) });
+        track("StartHealthBreath", { duration: Math.max(1, minutes) });
       }
     }
   }, [step, running, minutes]);
@@ -289,7 +289,7 @@ export default function BreathApp() {
     const cycles = cyclesCompleted; // snapshot exactly what we display
     setFinalCycles(cycles);
     // Report completion to Plausible
-    track("BreathSessionComplete", { duration: Math.max(1, minutes) });
+    track("FinnishHealthBreath", { duration: Math.max(1, minutes) });
     const record: SessionRecord = {
       id: cryptoRandomId(),
       date: new Date().toISOString(),
